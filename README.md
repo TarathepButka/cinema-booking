@@ -87,101 +87,51 @@ Local frontend development requires Node.js `^20.19.0` or `>=22.12.0`. The Docke
 sequenceDiagram
     autonumber
     actor User
-    participant UI as Vue Frontend
-    participant API as Go / Gin API
+    participant UI as Frontend
+    participant API as Backend API
     participant Redis as Redis
     participant Mongo as MongoDB
-    participant WS as WebSocket Hub
-    participant MQ as Redis Pub/Sub
-    participant Worker as Email Consumer
-    participant Email as Resend
+    participant WS as WebSocket
+    participant Email as Email Service
 
-    rect rgb(245, 247, 250)
-        Note over User,API: Authentication and seat map
-        User->>UI: Sign in
-        UI->>API: Google OAuth or admin login
-        API-->>UI: Set cinema_session cookie
-        UI->>API: GET movies, showtimes, and seat map
-        API->>Mongo: Read catalog and showtime data
-        Mongo-->>API: Movies, showtimes, and seats
-        API-->>UI: Current seat map
-        UI->>API: Connect /ws/showtimes/{id}
-        API-->>UI: WebSocket connected
+    User->>UI: Sign in and select a showtime
+    UI->>API: Load the seat map
+    API->>Mongo: Read showtime and seats
+    Mongo-->>UI: Display available seats
+
+    User->>UI: Select seats
+    UI->>API: Request a lock for each seat
+    API->>Redis: Lock seat for 5 minutes
+
+    alt Seat is available
+        Redis-->>API: Lock acquired
+        API->>Mongo: Mark seat as LOCKED
+        API->>WS: Broadcast seat update
+        WS-->>UI: Update seat maps in real time
+        API-->>UI: Start 5-minute countdown
+    else Seat is already locked
+        Redis-->>API: Lock rejected
+        API-->>UI: Show seat unavailable
     end
 
-    loop Once for each selected seat
-        User->>UI: Select a seat
-        UI->>API: POST /api/bookings/locks<br/>{showtimeId, seatLabel}
-        API->>Redis: SET seat:{showtimeId}:{seatLabel}<br/>{userId} NX EX 300
+    User->>UI: Confirm booking
+    UI->>API: Submit all selected seats
+    API->>Redis: Verify lock owner and expiry
 
-        alt Redis lock acquired
-            Redis-->>API: Lock created
-            API->>Mongo: Atomically change AVAILABLE to LOCKED
-
-            alt MongoDB seat update succeeds
-                Mongo-->>API: Seat locked
-                API->>Mongo: Write SEAT_LOCKED audit log
-                API->>WS: Broadcast SEAT_UPDATE: LOCKED
-                WS-->>UI: Update connected seat maps
-                API-->>UI: 200 OK with expiresAt
-                UI-->>User: Start five-minute countdown
-            else Seat is no longer available
-                Mongo-->>API: Update rejected
-                API->>Redis: Force-delete acquired lock
-                API-->>UI: 409 Conflict
-                UI-->>User: Reload seat availability
-            end
-        else Redis lock already exists
-            Redis-->>API: Lock rejected
-            API-->>UI: 409 Conflict
-            UI-->>User: Seat is unavailable
-        end
-    end
-
-    User->>UI: Confirm selected seats
-    UI->>API: POST /api/bookings<br/>{showtimeId, seatLabels[]}
-
-    loop Validate every selected seat
-        API->>Redis: Read lock owner and TTL
-        Redis-->>API: Owner and remaining time
-    end
-
-    alt All locks are valid and owned by the user
-        API->>Mongo: Begin transaction
-        API->>Mongo: Validate LOCKED seats and owner
-        API->>Mongo: Change seats to BOOKED
-        API->>Mongo: Create CONFIRMED booking
-        API->>Mongo: Write BOOKING_SUCCESS audit log
-        Mongo-->>API: Commit transaction
-
-        loop Every booked seat
-            API->>Redis: Owner-checked lock release
-            API->>WS: Broadcast SEAT_UPDATE: BOOKED
-            WS-->>UI: Update connected seat maps
-        end
-
-        API->>MQ: Publish BOOKING_SUCCESS
-        API-->>UI: 201 Created with booking
-        UI-->>User: Show booking confirmation
-
-        MQ-->>Worker: Deliver booking event
-        Worker->>Email: Send confirmation email
-        Email-->>User: Booking email
-    else Lock expired or belongs to another user
-        API-->>UI: 400 Bad Request
-        UI-->>User: Return to seat selection
-    end
-
-    opt User cancels or the five-minute hold expires
-        API->>Mongo: Change LOCKED seat to AVAILABLE
-        API->>Redis: Delete seat lock
-        API->>Mongo: Write release or timeout audit log
-        API->>WS: Broadcast SEAT_UPDATE: AVAILABLE
-        WS-->>UI: Refresh seat availability
+    alt Locks are valid
+        API->>Mongo: Book seats in one transaction
+        Mongo-->>API: Booking confirmed
+        API->>Redis: Release seat locks
+        API->>WS: Broadcast BOOKED seats
+        API-->>UI: Show booking confirmation
+        API->>Email: Send email asynchronously
+        Email-->>User: Booking confirmation email
+    else Lock expired
+        API-->>UI: Return to seat selection
     end
 ```
 
-The lock endpoint accepts one seat per request, while booking confirmation accepts all selected seats in one transaction. A manual release happens immediately; expired MongoDB locks are cleaned by the scheduler every 30 seconds.
+Redis temporarily reserves each selected seat, while MongoDB stores the durable booking. If the user does not confirm within five minutes, the lock expires and the seat becomes available again.
 
 ## 4. Redis Lock Strategy
 
