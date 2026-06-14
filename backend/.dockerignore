@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+.idea
+.vscode
+*.exe
+server
+coverage*
+tmp
+bin
+dist
+Dockerfile*
+README*
