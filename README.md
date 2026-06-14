@@ -182,6 +182,10 @@ Redis Pub/Sub is fire-and-forget and does not persist messages. If the consumer 
 Create the root environment file:
 
 ```bash
+git clone https://github.com/TarathepButka/cinema-booking
+
+cd cinema-booking
+
 cp .env.example .env
 ```
 
