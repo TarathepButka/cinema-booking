@@ -1,0 +1,169 @@
+name: cinema-booking
+
+x-service-security: &service-security
+  restart: unless-stopped
+  init: true
+
+services:
+  mongodb:
+    image: mongo:7.0
+    <<: *service-security
+    command:
+      [
+        "bash",
+        "-c",
+        "printf '%s' \"$$MONGO_REPLICA_KEY\" | base64 > /tmp/mongo-keyfile && chmod 400 /tmp/mongo-keyfile && chown mongodb:mongodb /tmp/mongo-keyfile && exec docker-entrypoint.sh mongod --replSet rs0 --bind_ip_all --keyFile /tmp/mongo-keyfile",
+      ]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:?MONGO_ROOT_USER is required}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASS:?MONGO_ROOT_PASS is required}
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-cinemadb}
+      MONGO_REPLICA_KEY: ${MONGO_REPLICA_KEY:?MONGO_REPLICA_KEY is required}
+    volumes:
+      - mongo_data:/data/db
+      - mongo_config:/data/configdb
+    networks:
+      - data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet --username \"$$MONGO_INITDB_ROOT_USERNAME\" --password \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval \"try { quit(rs.status().ok ? 0 : 2) } catch (e) { quit(rs.initiate({_id:'rs0',members:[{_id:0,host:'mongodb:27017'}]}).ok ? 0 : 2) }\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    mem_limit: 768m
+    cpus: 1.0
+
+  redis:
+    image: redis:7.4-alpine
+    <<: *service-security
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    command:
+      [
+        "sh",
+        "-c",
+        "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\"",
+      ]
+    volumes:
+      - redis_data:/data
+    networks:
+      - data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    mem_limit: 256m
+    cpus: 0.5
+
+  backend:
+    image: ${DOCKERHUB_USERNAME:-local}/cinema-backend:${IMAGE_TAG:-dev}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    <<: *service-security
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      PORT: "8080"
+      GIN_MODE: release
+      MONGO_USER: ${MONGO_ROOT_USER:?MONGO_ROOT_USER is required}
+      MONGO_PASSWORD: ${MONGO_ROOT_PASS:?MONGO_ROOT_PASS is required}
+      MONGO_HOST: mongodb:27017
+      MONGO_REPLICA_SET: ${MONGO_REPLICA_SET:-rs0}
+      MONGO_DIRECT_CONNECTION: "false"
+      MONGODB_DB: ${MONGO_DB:-cinemadb}
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS:-24}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URL: ${GOOGLE_REDIRECT_URL:?GOOGLE_REDIRECT_URL is required}
+      FRONTEND_URL: ${FRONTEND_URL:?FRONTEND_URL is required}
+      APP_ORIGINS: ${APP_ORIGINS:?APP_ORIGINS is required}
+      COOKIE_SECURE: "false"
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-noreply@example.com}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?ADMIN_EMAIL is required}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - edge
+      - data
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 15s
+    mem_limit: 512m
+    cpus: 1.0
+
+  frontend:
+    image: ${DOCKERHUB_USERNAME:-local}/cinema-frontend:${IMAGE_TAG:-dev}
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    <<: *service-security
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "80:8080"
+    networks:
+      - edge
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+      - /var/cache/nginx:size=16m,mode=0755
+      - /var/run:size=4m,mode=0755
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:8080/healthz",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 10s
+    mem_limit: 128m
+    cpus: 0.5
+
+volumes:
+  mongo_data:
+  mongo_config:
+  redis_data:
+
+networks:
+  edge:
+  data:
+    internal: true
