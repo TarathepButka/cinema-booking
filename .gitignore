@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+!.env.dev.example
+*.pem
+*.key
+backend/main.exe
+backend/server
+frontend/dist/
+frontend/node_modules/
+*.go.*
+.cache/
+.agents/
+frontend/playwright-report/
+frontend/test-results/
+docker-compose.prod.yml
